@@ -18,11 +18,11 @@ const char* WIFI_PASSWORD = "N0_Th1ng";
 // DEFAULT NEXT.JS / CLOUDFLARE SERVER CONFIG
 // (Can also be updated live in the ESP32 Web UI at http://<ESP32_IP>/ without reflashing)
 // ========================================
+// Cloudflare Workers:     https://iot-fyp.adam1410faizal.workers.dev
 // Local PC Wi-Fi IP:      http://172.20.80.178:3000
 // Windows Mobile Hotspot: http://192.168.137.1:3000
-// Cloudflare Workers:     https://iot-fyp.<your-subdomain>.workers.dev
 
-const char* DEFAULT_SERVER_URL = "http://172.20.80.178:3000";
+const char* DEFAULT_SERVER_URL = "https://iot-fyp.adam1410faizal.workers.dev";
 const char* DEFAULT_FEED_TOKEN = "fyp2-5a65c3f277e544e889e9a75281f6e6b6";
 const char* DEFAULT_RUN_LABEL  = "esp32-wifi";
 const float DEFAULT_THRESHOLD_G = 0.30f;
@@ -107,7 +107,7 @@ WebServer server(80);
 // ========================================
 
 void loadSettings() {
-  prefs.begin("fyp-esp32", true);
+  prefs.begin("fyp-esp32-v2", true);
   cfgServerUrl = prefs.getString("serverUrl", DEFAULT_SERVER_URL);
   cfgFeedToken = prefs.getString("feedToken", DEFAULT_FEED_TOKEN);
   cfgRunLabel = prefs.getString("runLabel", DEFAULT_RUN_LABEL);
@@ -132,7 +132,7 @@ void saveSettings() {
   cfgFeedToken.trim();
   cfgRunLabel.trim();
 
-  prefs.begin("fyp-esp32", false);
+  prefs.begin("fyp-esp32-v2", false);
   prefs.putString("serverUrl", cfgServerUrl);
   prefs.putString("feedToken", cfgFeedToken);
   prefs.putString("runLabel", cfgRunLabel);
@@ -645,12 +645,13 @@ button {
   <div class="panel">
     <h2>Target Server Configuration (Saved in Flash)</h2>
     <div class="row" style="margin-top:0; margin-bottom:8px;">
+      <button class="btn-preset" onclick="setPreset('https://iot-fyp.adam1410faizal.workers.dev')">Preset: Cloudflare Workers</button>
       <button class="btn-preset" onclick="setPreset('http://172.20.80.178:3000')">Preset: Local PC Wi-Fi (172.20.80.178:3000)</button>
       <button class="btn-preset" onclick="setPreset('http://192.168.137.1:3000')">Preset: Win Hotspot (192.168.137.1:3000)</button>
     </div>
 
     <label>Next.js Local or Cloudflare Workers URL (no trailing slash)</label>
-    <input type="text" id="serverUrl" placeholder="https://iot-fyp.<subdomain>.workers.dev">
+    <input type="text" id="serverUrl" placeholder="https://iot-fyp.adam1410faizal.workers.dev">
 
     <label>FEED_API_TOKEN (x-feed-token)</label>
     <input type="text" id="feedToken">
