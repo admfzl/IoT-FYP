@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin, type FeedLog, type FeederState } from "@/lib/supabase";
 import { computeSummaryBySource } from "@/lib/stats";
-import { isTuyaConfigured } from "@/lib/tuya";
+import { getTuyaHardwareStatus, isTuyaConfigured } from "@/lib/tuya";
+import { getEsp32TelemetryState } from "@/lib/esp32-telemetry";
 
 export const dynamic = "force-dynamic";
 
@@ -23,17 +24,35 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // 1. Fetch feeder_state (id = 1)
-  const { data: stateRow, error: stateError } = await supabase
+  // 1. Fetch feeder_state (id = 1), auto-inserting row id=1 if table exists but is empty
+  let { data: stateRow, error: stateError } = await supabase
     .from("feeder_state")
     .select("*")
     .eq("id", 1)
-    .single();
+    .maybeSingle();
+
+  if (!stateError && !stateRow) {
+    const { data: insertedState, error: insertStateErr } = await supabase
+      .from("feeder_state")
+      .insert({
+        id: 1,
+        remaining_grams: 60.0,
+        max_capacity_grams: 60.0,
+        grams_per_portion: 1.5,
+        cooldown_seconds: 5,
+        simulation_mode: false,
+        last_feed_at: null
+      })
+      .select("*")
+      .single();
+    stateRow = insertedState;
+    stateError = insertStateErr;
+  }
 
   if (stateError || !stateRow) {
     return NextResponse.json(
       {
-        error: `Failed to fetch feeder_state: ${stateError?.message ?? "row id=1 missing. Run supabase/migration.sql first."}`
+        error: `Failed to fetch feeder_state: ${stateError?.message ?? "row id=1 missing. Paste supabase/migration.sql into the Supabase SQL Editor and click Run."}`
       },
       { status: 500 }
     );
@@ -98,10 +117,14 @@ export async function GET(req: NextRequest) {
   }));
 
   const summaryBySource = computeSummaryBySource(allLogs);
+  const tuyaHardwareStatus = await getTuyaHardwareStatus();
+  const esp32Telemetry = getEsp32TelemetryState();
 
   return NextResponse.json({
     feederState,
     tuyaConfigured: isTuyaConfigured(),
+    tuyaHardwareStatus,
+    esp32Telemetry,
     totalLiveFeeds: totalLiveFeeds ?? 0,
     includeDemo,
     logs: allLogs.slice(0, 50), // Latest 50 for table (descending)

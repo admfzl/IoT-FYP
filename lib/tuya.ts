@@ -332,3 +332,99 @@ export async function feedOnce(): Promise<FeedOnceResult> {
   };
 }
 
+export interface TuyaHardwareSensorStatus {
+  lowFoodSensorTriggered: boolean | null; // DP 6 ("status"): "YES" = low food, "NO" = normal
+  rawStatusValue: string | null;
+  reminderSwitchEnabled: boolean | null; // DP 25 ("switch"): 缺料提醒开关
+  updatedAtMs: number | null;
+}
+
+// Cache shadow reads so dashboard polling (every 3 s) doesn't burn Tuya API quota.
+const HW_STATUS_TTL_MS = 15_000;
+let hwStatusCache: { value: TuyaHardwareSensorStatus; fetchedAt: number } | null = null;
+
+export async function getTuyaHardwareStatus(): Promise<TuyaHardwareSensorStatus> {
+  if (hwStatusCache && Date.now() - hwStatusCache.fetchedAt < HW_STATUS_TTL_MS) {
+    return hwStatusCache.value;
+  }
+  const value = await fetchTuyaHardwareStatus();
+  hwStatusCache = { value, fetchedAt: Date.now() };
+  return value;
+}
+
+async function fetchTuyaHardwareStatus(): Promise<TuyaHardwareSensorStatus> {
+  if (!isTuyaConfigured()) {
+    return {
+      lowFoodSensorTriggered: null,
+      rawStatusValue: null,
+      reminderSwitchEnabled: null,
+      updatedAtMs: null
+    };
+  }
+
+  try {
+    const { clientId, clientSecret, deviceId, baseUrl } = getTuyaConfig();
+    const { accessToken } = await getValidAccessToken(false);
+    const pathWithQuery = `/v2.0/cloud/thing/${encodeURIComponent(deviceId)}/shadow/properties`;
+    const t = String(Date.now());
+    const nonce = "";
+    const stringToSign = await buildStringToSign("GET", "", pathWithQuery);
+    const payloadToSign = `${clientId}${accessToken}${t}${nonce}${stringToSign}`;
+    const sign = await hmacSha256UpperHex(clientSecret, payloadToSign);
+
+    const response = await fetch(`${baseUrl}${pathWithQuery}`, {
+      method: "GET",
+      headers: {
+        client_id: clientId,
+        access_token: accessToken,
+        sign,
+        t,
+        sign_method: "HMAC-SHA256",
+        nonce
+      },
+      cache: "no-store"
+    });
+
+    const json = (await response.json()) as TuyaResponse<{
+      properties?: Array<{
+        code: string;
+        dp_id: number;
+        value: unknown;
+        time: number;
+      }>;
+    }>;
+
+    const props = json?.result?.properties;
+    if (!json.success || !Array.isArray(props)) {
+      return {
+        lowFoodSensorTriggered: null,
+        rawStatusValue: null,
+        reminderSwitchEnabled: null,
+        updatedAtMs: null
+      };
+    }
+
+    const statusDp = props.find((p) => p.code === "status" || p.dp_id === 6);
+    const switchDp = props.find((p) => p.code === "switch" || p.dp_id === 25);
+    const rawVal =
+      statusDp?.value !== undefined ? String(statusDp.value) : null;
+
+    return {
+      lowFoodSensorTriggered:
+        rawVal === "YES" ? true : rawVal === "NO" ? false : null,
+      rawStatusValue: rawVal,
+      reminderSwitchEnabled:
+        typeof switchDp?.value === "boolean" ? switchDp.value : null,
+      updatedAtMs: typeof statusDp?.time === "number" ? statusDp.time : null
+    };
+  } catch {
+    return {
+      lowFoodSensorTriggered: null,
+      rawStatusValue: null,
+      reminderSwitchEnabled: null,
+      updatedAtMs: null
+    };
+  }
+}
+
+

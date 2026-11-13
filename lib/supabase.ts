@@ -47,6 +47,7 @@ export interface ReservePortionResult {
 }
 
 let cachedClient: SupabaseClient | null = null;
+let cachedKey: string | null = null;
 
 export function getSupabaseAdmin(): SupabaseClient {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
@@ -58,13 +59,15 @@ export function getSupabaseAdmin(): SupabaseClient {
     );
   }
 
-  if (!cachedClient) {
+  const cacheSignature = `${url}::${serviceKey}`;
+  if (!cachedClient || cachedKey !== cacheSignature) {
     cachedClient = createClient(url, serviceKey, {
       auth: {
         persistSession: false,
         autoRefreshToken: false
       }
     });
+    cachedKey = cacheSignature;
   }
 
   return cachedClient;

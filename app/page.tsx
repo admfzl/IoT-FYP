@@ -20,12 +20,28 @@ import { TokenGate, TokenStatusButton } from "@/components/TokenGate";
 import { LatencyCharts } from "@/components/LatencyCharts";
 import { DepletionChart } from "@/components/DepletionChart";
 import { FeedLogTable } from "@/components/FeedLogTable";
+import { Esp32MonitorCard } from "@/components/Esp32MonitorCard";
 import type { FeederState, FeedLog } from "@/lib/supabase";
 import type { SourceLatencyStats } from "@/lib/stats";
+import type {
+  Esp32TelemetryHistoryPoint,
+  Esp32TelemetryReading
+} from "@/lib/esp32-telemetry";
 
 interface StatsApiResponse {
   feederState: FeederState;
   tuyaConfigured: boolean;
+  tuyaHardwareStatus?: {
+    lowFoodSensorTriggered: boolean | null;
+    rawStatusValue: string | null;
+    reminderSwitchEnabled: boolean | null;
+    updatedAtMs: number | null;
+  };
+  esp32Telemetry?: {
+    online: boolean;
+    latest: Esp32TelemetryReading | null;
+    history: Esp32TelemetryHistoryPoint[];
+  };
   totalLiveFeeds: number;
   includeDemo: boolean;
   logs: FeedLog[];
@@ -359,7 +375,9 @@ function DashboardContent({
   const maxCap = state?.max_capacity_grams ?? 60;
   const remainingPercent =
     maxCap > 0 ? Math.round((remainingGrams / maxCap) * 1000) / 10 : 0;
-  const isLowFood = remainingPercent < 20;
+  const hwSensorTriggered =
+    stats?.tuyaHardwareStatus?.lowFoodSensorTriggered === true;
+  const isLowFood = remainingPercent < 20 || hwSensorTriggered;
   const isSimMode = Boolean(state?.simulation_mode);
 
   return (
@@ -376,13 +394,15 @@ function DashboardContent({
         </div>
       )}
 
-      {/* §9.1 Low Food Warning Banner when < 20% */}
+      {/* §9.1 Low Food Warning Banner when < 20% or Tuya DP 6 hardware sensor triggers */}
       {isLowFood && (
         <div className="bg-rose-600 text-white px-4 py-2.5 text-center font-bold text-xs sm:text-sm flex items-center justify-center gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           <span>
             LOW FOOD WARNING: Hopper remaining feed is at {remainingGrams} g (
-            {remainingPercent}% &lt; 20% threshold). Refill hopper soon!
+            {remainingPercent}%) • Tuya Optical Sensor (DP 6 `status`):{" "}
+            {stats?.tuyaHardwareStatus?.rawStatusValue ?? "N/A"}{" "}
+            {hwSensorTriggered ? "(SHORTAGE DETECTED)" : ""}
           </span>
         </div>
       )}
@@ -479,6 +499,20 @@ function DashboardContent({
                 }}
               />
             </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+              Tuya Sensor (DP 6 <code className="font-mono">status</code>):{" "}
+              {stats?.tuyaHardwareStatus?.rawStatusValue === "YES" ? (
+                <span className="text-rose-500 font-bold">
+                  YES (Low Food Triggered)
+                </span>
+              ) : stats?.tuyaHardwareStatus?.rawStatusValue === "NO" ? (
+                <span className="text-emerald-500 font-semibold">
+                  NO (Sufficient)
+                </span>
+              ) : (
+                <span>—</span>
+              )}
+            </p>
           </div>
 
           {/* Card 2: Tuya Actuation Mode Badge */}
@@ -685,6 +719,9 @@ function DashboardContent({
             </div>
           </form>
         </section>
+
+        {/* ESP32-S3 + ADXL345 Live Sensor Stream */}
+        <Esp32MonitorCard initialTelemetry={stats?.esp32Telemetry} />
 
         {/* Chart 1 & Latency Summary Table */}
         <LatencyCharts
