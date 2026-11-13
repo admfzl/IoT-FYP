@@ -119,7 +119,7 @@ export function Esp32MonitorCard({
             1. Flash the updated <code className="font-mono">arduino.ino</code> to your ESP32-S3 (make sure Arduino Serial Monitor shows <code className="font-mono">WiFi connected!</code>).
           </p>
           <p>
-            2. By default, <code className="font-mono">arduino.ino</code> sends data to your local server (<code className="font-mono">http://172.20.80.178:3000</code>). Once you deploy with <code className="font-mono">npm run deploy</code>, open the ESP32&apos;s IP in your browser (or edit <code className="font-mono">DEFAULT_SERVER_URL</code> in <code className="font-mono">arduino.ino</code>) and paste your <code className="font-mono">https://fish-feeder.&lt;subdomain&gt;.workers.dev</code> URL!
+            2. By default, <code className="font-mono">arduino.ino</code> sends data to your local server (<code className="font-mono">http://172.20.80.178:3000</code>). Once you deploy with <code className="font-mono">npm run deploy</code>, open the ESP32&apos;s IP in your browser (or edit <code className="font-mono">DEFAULT_SERVER_URL</code> in <code className="font-mono">arduino.ino</code>) and paste your <code className="font-mono">https://iot-fyp.&lt;subdomain&gt;.workers.dev</code> URL!
           </p>
         </div>
       ) : (

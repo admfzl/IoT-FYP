@@ -20,7 +20,7 @@ const char* WIFI_PASSWORD = "N0_Th1ng";
 // ========================================
 // Local PC Wi-Fi IP:      http://172.20.80.178:3000
 // Windows Mobile Hotspot: http://192.168.137.1:3000
-// Cloudflare Workers:     https://fish-feeder.<your-subdomain>.workers.dev
+// Cloudflare Workers:     https://iot-fyp.<your-subdomain>.workers.dev
 
 const char* DEFAULT_SERVER_URL = "http://172.20.80.178:3000";
 const char* DEFAULT_FEED_TOKEN = "fyp2-5a65c3f277e544e889e9a75281f6e6b6";
@@ -650,7 +650,7 @@ button {
     </div>
 
     <label>Next.js Local or Cloudflare Workers URL (no trailing slash)</label>
-    <input type="text" id="serverUrl" placeholder="https://fish-feeder.<subdomain>.workers.dev">
+    <input type="text" id="serverUrl" placeholder="https://iot-fyp.<subdomain>.workers.dev">
 
     <label>FEED_API_TOKEN (x-feed-token)</label>
     <input type="text" id="feedToken">
