@@ -1,11 +1,16 @@
 # Public (safe to expose)
 NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=      # optional: only for Realtime read of sensor_readings
 
 # Server-only secrets
-SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_SERVICE_ROLE_KEY=          # server only
 TUYA_CLIENT_ID=
 TUYA_CLIENT_SECRET=
 TUYA_DEVICE_ID=a33d5216f7875b6d3er7kk
 TUYA_BASE_URL=https://openapi-sg.iotbing.com
 FEED_API_TOKEN=
-
+CRON_SECRET=
+TELEGRAM_BOT_TOKEN=                 # optional
+TELEGRAM_CHAT_ID=                   # optional
+RESEND_API_KEY=                     # optional
+ALERT_EMAIL_TO=                     # optional

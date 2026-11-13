@@ -1,17 +1,51 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyFeedToken } from "@/lib/auth";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { isTuyaConfigured } from "@/lib/tuya";
+import { isEmailConfigured, isTelegramConfigured } from "@/lib/notify";
+import { safeTimezone } from "@/lib/time";
 
-export async function POST(req: NextRequest) {
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  try {
+    const supabase = getSupabaseAdmin();
+    const [{ data: settings }, { data: heartbeats }] = await Promise.all([
+      supabase.from("feeder_settings").select("*").eq("id", 1).single(),
+      supabase
+        .from("device_heartbeats")
+        .select("*")
+        .order("last_seen_at", { ascending: false })
+        .limit(1)
+    ]);
+
+    return NextResponse.json({
+      settings: settings ?? null,
+      tuyaConfigured: isTuyaConfigured(),
+      tuyaDeviceId:
+        process.env.TUYA_DEVICE_ID?.trim() || "a33d5216f7875b6d3er7kk",
+      channelsConfigured: {
+        telegram: isTelegramConfigured(),
+        email: isEmailConfigured()
+      },
+      esp32Heartbeat: heartbeats?.[0] ?? null
+    });
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error:
+          err instanceof Error ? err.message : "Failed to load settings."
+      },
+      { status: 500 }
+    );
+  }
+}
+
+async function handleUpdateSettings(req: NextRequest) {
   const authError = verifyFeedToken(req);
   if (authError) return authError;
 
-  let body: {
-    grams_per_portion?: unknown;
-    max_capacity_grams?: unknown;
-    cooldown_seconds?: unknown;
-    simulation_mode?: unknown;
-  };
+  let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
@@ -25,37 +59,79 @@ export async function POST(req: NextRequest) {
     updated_at: new Date().toISOString()
   };
 
-  if (body.grams_per_portion !== undefined) {
-    const val = Number(body.grams_per_portion);
-    if (!Number.isFinite(val) || val <= 0 || val > 500) {
+  if (body.capacity_portions !== undefined) {
+    const v = Number(body.capacity_portions);
+    if (!Number.isInteger(v) || v < 1 || v > 1000) {
       return NextResponse.json(
-        { error: "grams_per_portion must be between 0.01 and 500." },
+        { error: "capacity_portions must be between 1 and 1000." },
         { status: 400 }
       );
     }
-    updates.grams_per_portion = Math.round(val * 100) / 100;
+    updates.capacity_portions = v;
   }
 
-  if (body.max_capacity_grams !== undefined) {
-    const val = Number(body.max_capacity_grams);
-    if (!Number.isFinite(val) || val <= 0 || val > 10000) {
+  if (body.low_food_threshold_percent !== undefined) {
+    const v = Number(body.low_food_threshold_percent);
+    if (!Number.isInteger(v) || v < 1 || v > 90) {
       return NextResponse.json(
-        { error: "max_capacity_grams must be between 1 and 10000." },
+        { error: "low_food_threshold_percent must be between 1 and 90." },
         { status: 400 }
       );
     }
-    updates.max_capacity_grams = Math.round(val * 100) / 100;
+    updates.low_food_threshold_percent = v;
   }
 
-  if (body.cooldown_seconds !== undefined) {
-    const val = Number(body.cooldown_seconds);
-    if (!Number.isInteger(val) || val < 1 || val > 3600) {
+  if (body.daily_max_portions !== undefined) {
+    const v = Number(body.daily_max_portions);
+    if (!Number.isInteger(v) || v < 1 || v > 500) {
       return NextResponse.json(
-        { error: "cooldown_seconds must be an integer between 1 and 3600." },
+        { error: "daily_max_portions must be between 1 and 500." },
         { status: 400 }
       );
     }
-    updates.cooldown_seconds = val;
+    updates.daily_max_portions = v;
+  }
+
+  if (body.quiet_hours_start !== undefined) {
+    if (body.quiet_hours_start === null || body.quiet_hours_start === "") {
+      updates.quiet_hours_start = null;
+    } else if (
+      typeof body.quiet_hours_start === "string" &&
+      /^\d{2}:\d{2}(:\d{2})?$/.test(body.quiet_hours_start.trim())
+    ) {
+      updates.quiet_hours_start = body.quiet_hours_start.trim().slice(0, 5);
+    } else {
+      return NextResponse.json(
+        { error: "quiet_hours_start must be HH:MM or null." },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (body.quiet_hours_end !== undefined) {
+    if (body.quiet_hours_end === null || body.quiet_hours_end === "") {
+      updates.quiet_hours_end = null;
+    } else if (
+      typeof body.quiet_hours_end === "string" &&
+      /^\d{2}:\d{2}(:\d{2})?$/.test(body.quiet_hours_end.trim())
+    ) {
+      updates.quiet_hours_end = body.quiet_hours_end.trim().slice(0, 5);
+    } else {
+      return NextResponse.json(
+        { error: "quiet_hours_end must be HH:MM or null." },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (body.skip_when_empty !== undefined) {
+    if (typeof body.skip_when_empty !== "boolean") {
+      return NextResponse.json(
+        { error: "skip_when_empty must be a boolean." },
+        { status: 400 }
+      );
+    }
+    updates.skip_when_empty = body.skip_when_empty;
   }
 
   if (body.simulation_mode !== undefined) {
@@ -68,23 +144,45 @@ export async function POST(req: NextRequest) {
     updates.simulation_mode = body.simulation_mode;
   }
 
-  let supabase;
-  try {
-    supabase = getSupabaseAdmin();
-  } catch (err) {
-    return NextResponse.json(
-      {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Database configuration error on server."
-      },
-      { status: 500 }
-    );
+  if (body.timezone !== undefined && typeof body.timezone === "string") {
+    updates.timezone = safeTimezone(body.timezone.trim());
   }
 
+  if (body.esp32_offline_minutes !== undefined) {
+    const v = Number(body.esp32_offline_minutes);
+    if (!Number.isInteger(v) || v < 1 || v > 1440) {
+      return NextResponse.json(
+        { error: "esp32_offline_minutes must be between 1 and 1440." },
+        { status: 400 }
+      );
+    }
+    updates.esp32_offline_minutes = v;
+  }
+
+  if (body.sensor_retention_days !== undefined) {
+    const v = Number(body.sensor_retention_days);
+    if (!Number.isInteger(v) || v < 1 || v > 365) {
+      return NextResponse.json(
+        { error: "sensor_retention_days must be between 1 and 365." },
+        { status: 400 }
+      );
+    }
+    updates.sensor_retention_days = v;
+  }
+
+  if (typeof body.notify_browser === "boolean") {
+    updates.notify_browser = body.notify_browser;
+  }
+  if (typeof body.notify_telegram === "boolean") {
+    updates.notify_telegram = body.notify_telegram;
+  }
+  if (typeof body.notify_email === "boolean") {
+    updates.notify_email = body.notify_email;
+  }
+
+  const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
-    .from("feeder_state")
+    .from("feeder_settings")
     .update(updates)
     .eq("id", 1)
     .select("*")
@@ -99,7 +197,14 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
-    feederState: data
+    settings: data
   });
 }
 
+export async function PUT(req: NextRequest) {
+  return handleUpdateSettings(req);
+}
+
+export async function POST(req: NextRequest) {
+  return handleUpdateSettings(req);
+}

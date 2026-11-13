@@ -2,81 +2,70 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
+import { ChevronLeft } from "lucide-react";
 import {
-  Activity,
-  ArrowLeft,
-  Play,
-  ShieldAlert,
-  Smartphone,
-  Square,
-  Sun
-} from "lucide-react";
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  YAxis,
-  XAxis,
-  ReferenceLine,
-  CartesianGrid
-} from "recharts";
-import { TokenGate, TokenStatusButton } from "@/components/TokenGate";
-
-interface MotionSample {
-  t: string;
-  dynamicG: number;
-}
+  Button,
+  Card,
+  EmptyState,
+  Input,
+  SectionHeader,
+  StatusDot,
+  Table,
+  Td,
+  THead,
+  Th
+} from "@/components/ui";
+import { LiveChart, type LiveVibrationPoint } from "@/components/charts";
+import { TokenGate } from "@/components/TokenGate";
+import type { TriggerSourceRow } from "@/lib/supabase-server";
 
 interface TriggerLogEntry {
   id: string;
   time: string;
   vibrationG: number;
+  portions: number;
   clientRttMs: number | null;
   serverTotalMs: number | null;
   tuyaApiMs: number | null;
-  status: "OK" | "COOLDOWN" | "ERROR";
+  status: "OK" | "COOLDOWN" | "SKIPPED" | "ERROR";
   detail: string;
 }
 
-// iOS 13+ DeviceMotionEvent permission typing
 interface DeviceMotionEventWithPermission extends DeviceMotionEvent {
   requestPermission?: () => Promise<"granted" | "denied">;
 }
 
-export default function SensorPage() {
+export default function PhoneSensorPage() {
   return (
     <TokenGate>
-      {(token, clearToken) => (
-        <SensorContent token={token} onClearToken={clearToken} />
-      )}
+      {(token) => <PhoneSensorContent token={token} />}
     </TokenGate>
   );
 }
 
-function SensorContent({
-  token,
-  onClearToken
-}: {
-  token: string;
-  onClearToken: () => void;
-}) {
+function PhoneSensorContent({ token }: { token: string }) {
   const [running, setRunning] = useState(false);
   const [thresholdG, setThresholdG] = useState(0.3);
-  const [runLabel, setRunLabel] = useState("phone-wifi");
+  const [testLabel, setTestLabel] = useState("phone-wifi");
   const [dynamicG, setDynamicG] = useState(0);
-  const [rawTotalG, setRawTotalG] = useState(0);
-  const [samples, setSamples] = useState<MotionSample[]>([]);
+  const [samples, setSamples] = useState<LiveVibrationPoint[]>([]);
   const [triggers, setTriggers] = useState<TriggerLogEntry[]>([]);
   const [sensorStatus, setSensorStatus] = useState<string>(
-    "Idle — press Start Sensor to begin listening to device motion."
+    "Ready. Press Start to begin reading phone motion."
   );
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
 
-  // Refs used inside high-frequency devicemotion listener
+  // Server source settings for PHONE_SENSOR
+  const [sourceEnabled, setSourceEnabled] = useState(true);
+  const [portionsPerTrigger, setPortionsPerTrigger] = useState(1);
+  const [cooldownSeconds, setCooldownSeconds] = useState(5);
+
   const thresholdRef = useRef(thresholdG);
-  const runLabelRef = useRef(runLabel);
+  const testLabelRef = useRef(testLabel);
   const tokenRef = useRef(token);
+  const cooldownMsRef = useRef(5000);
+  const sourceEnabledRef = useRef(true);
   const lastTriggerTimeRef = useRef(0);
   const inFlightRef = useRef(false);
   const gravityRef = useRef({ x: 0, y: 0, z: 0, initialized: false });
@@ -84,40 +73,66 @@ function SensorContent({
   const wakeLockSentinelRef = useRef<WakeLockSentinel | null>(null);
   const runningRef = useRef(false);
 
+  // Load PHONE_SENSOR configuration from server
+  const loadPhoneConfig = useCallback(async () => {
+    try {
+      const res = await fetch("/api/trigger-sources", { cache: "no-store" });
+      if (!res.ok) return;
+      const json = await res.json();
+      const list = (json.sources ?? []) as TriggerSourceRow[];
+      const phone = list.find((s) => s.source === "PHONE_SENSOR");
+      if (phone) {
+        setSourceEnabled(phone.enabled);
+        sourceEnabledRef.current = phone.enabled;
+        setPortionsPerTrigger(phone.portions_per_trigger ?? 1);
+        const cdSec = phone.cooldown_seconds ?? 5;
+        setCooldownSeconds(cdSec);
+        cooldownMsRef.current = cdSec * 1000;
+        if (phone.threshold_g !== null && phone.threshold_g !== undefined) {
+          const t = Number(phone.threshold_g);
+          if (Number.isFinite(t) && t > 0) {
+            setThresholdG(t);
+            thresholdRef.current = t;
+          }
+        }
+      }
+    } catch {
+      // ignore network error
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPhoneConfig();
+  }, [loadPhoneConfig]);
+
   useEffect(() => {
     thresholdRef.current = thresholdG;
   }, [thresholdG]);
 
   useEffect(() => {
-    runLabelRef.current = runLabel;
-  }, [runLabel]);
+    testLabelRef.current = testLabel;
+  }, [testLabel]);
 
   useEffect(() => {
     tokenRef.current = token;
   }, [token]);
 
-  // Update local cooldown countdown badge
   useEffect(() => {
     const timer = setInterval(() => {
       const elapsed = Date.now() - lastTriggerTimeRef.current;
-      const rem = Math.max(0, 5000 - elapsed);
+      const rem = Math.max(0, cooldownMsRef.current - elapsed);
       setCooldownRemainingMs(rem);
     }, 200);
     return () => clearInterval(timer);
   }, []);
 
-  // Wake Lock management
   const acquireWakeLock = useCallback(async () => {
-    if (typeof navigator === "undefined" || !("wakeLock" in navigator)) {
-      return;
-    }
+    if (typeof navigator === "undefined" || !("wakeLock" in navigator)) return;
     try {
       const sentinel = await navigator.wakeLock.request("screen");
       wakeLockSentinelRef.current = sentinel;
       setWakeLockActive(true);
-      sentinel.addEventListener("release", () => {
-        setWakeLockActive(false);
-      });
+      sentinel.addEventListener("release", () => setWakeLockActive(false));
     } catch {
       setWakeLockActive(false);
     }
@@ -128,7 +143,7 @@ function SensorContent({
       try {
         await wakeLockSentinelRef.current.release();
       } catch {
-        // Ignore release errors
+        // ignore
       }
       wakeLockSentinelRef.current = null;
       setWakeLockActive(false);
@@ -137,17 +152,13 @@ function SensorContent({
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (
-        document.visibilityState === "visible" &&
-        runningRef.current
-      ) {
+      if (document.visibilityState === "visible" && runningRef.current) {
         acquireWakeLock();
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
+    return () =>
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
   }, [acquireWakeLock]);
 
   const firePhoneTrigger = useCallback(async (measuredG: number) => {
@@ -157,7 +168,9 @@ function SensorContent({
 
     const roundedG = Math.round(measuredG * 1000) / 1000;
     const entryId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const triggerTimeStr = new Date().toLocaleTimeString();
+    const triggerTimeStr = new Date().toLocaleTimeString("en-GB", {
+      hourCycle: "h23"
+    });
 
     try {
       const t0 = performance.now();
@@ -170,33 +183,14 @@ function SensorContent({
         body: JSON.stringify({
           source: "PHONE_SENSOR",
           vibrationG: roundedG,
-          runLabel: runLabelRef.current.trim() || undefined
+          testLabel: testLabelRef.current.trim() || undefined
         })
       });
       const t1 = performance.now();
       const clientRttMs = Math.max(1, Math.round(t1 - t0));
       const payload = await res.json();
 
-      if (res.status === 429) {
-        setTriggers((prev) => [
-          {
-            id: entryId,
-            time: triggerTimeStr,
-            vibrationG: roundedG,
-            clientRttMs,
-            serverTotalMs: null,
-            tuyaApiMs: null,
-            status: "COOLDOWN",
-            detail: `cooldown (retry in ${
-              payload.retryAfterMs ?? 5000
-            } ms)`
-          },
-          ...prev.slice(0, 29)
-        ]);
-        return;
-      }
-
-      if (payload.logId) {
+      if (payload.feedEventId) {
         await fetch("/api/feed/rtt", {
           method: "POST",
           headers: {
@@ -204,18 +198,59 @@ function SensorContent({
             "x-feed-token": tokenRef.current
           },
           body: JSON.stringify({
-            logId: payload.logId,
+            feedEventId: payload.feedEventId,
             clientRttMs
           })
         });
       }
 
-      if (!res.ok || !payload.success) {
+      if (res.status === 429) {
         setTriggers((prev) => [
           {
             id: entryId,
             time: triggerTimeStr,
             vibrationG: roundedG,
+            portions: 0,
+            clientRttMs,
+            serverTotalMs: null,
+            tuyaApiMs: null,
+            status: "COOLDOWN",
+            detail: payload.error ?? "Cooldown active"
+          },
+          ...prev.slice(0, 29)
+        ]);
+        return;
+      }
+
+      if (res.status === 409 || res.status === 422) {
+        if (payload.result === "SKIPPED_DISABLED") {
+          setSourceEnabled(false);
+          sourceEnabledRef.current = false;
+        }
+        setTriggers((prev) => [
+          {
+            id: entryId,
+            time: triggerTimeStr,
+            vibrationG: roundedG,
+            portions: 0,
+            clientRttMs,
+            serverTotalMs: payload.serverTotalMs ?? null,
+            tuyaApiMs: null,
+            status: "SKIPPED",
+            detail: payload.error ?? "Skipped"
+          },
+          ...prev.slice(0, 29)
+        ]);
+        return;
+      }
+
+      if (!res.ok || !payload.ok) {
+        setTriggers((prev) => [
+          {
+            id: entryId,
+            time: triggerTimeStr,
+            vibrationG: roundedG,
+            portions: 0,
             clientRttMs,
             serverTotalMs: payload.serverTotalMs ?? null,
             tuyaApiMs: payload.tuyaApiMs ?? null,
@@ -230,11 +265,12 @@ function SensorContent({
             id: entryId,
             time: triggerTimeStr,
             vibrationG: roundedG,
+            portions: payload.portionsDispensed ?? 1,
             clientRttMs,
             serverTotalMs: payload.serverTotalMs ?? null,
             tuyaApiMs: payload.tuyaApiMs ?? null,
             status: "OK",
-            detail: `Log #${payload.logId} (${payload.dataOrigin})`
+            detail: `Fed ${payload.portionsDispensed ?? 1} portion(s)`
           },
           ...prev.slice(0, 29)
         ]);
@@ -245,6 +281,7 @@ function SensorContent({
           id: entryId,
           time: triggerTimeStr,
           vibrationG: roundedG,
+          portions: 0,
           clientRttMs: null,
           serverTotalMs: null,
           tuyaApiMs: null,
@@ -267,20 +304,6 @@ function SensorContent({
 
       const rawAcc = event.accelerationIncludingGravity;
       if (
-        rawAcc &&
-        rawAcc.x !== null &&
-        rawAcc.y !== null &&
-        rawAcc.z !== null
-      ) {
-        const rx = rawAcc.x;
-        const ry = rawAcc.y;
-        const rz = rawAcc.z;
-        const rawG = Math.sqrt(rx * rx + ry * ry + rz * rz) / 9.81;
-        setRawTotalG(Math.round(rawG * 100) / 100);
-      }
-
-      // §9.2: Prefer event.acceleration (x, y, z in m/s²) when non-null
-      if (
         event.acceleration &&
         event.acceleration.x !== null &&
         event.acceleration.y !== null &&
@@ -296,7 +319,6 @@ function SensorContent({
         rawAcc.y !== null &&
         rawAcc.z !== null
       ) {
-        // Fallback: low-pass gravity estimate: gravity = 0.9*gravity + 0.1*raw, linear = raw - gravity
         const g = gravityRef.current;
         if (!g.initialized) {
           g.x = rawAcc.x;
@@ -316,7 +338,7 @@ function SensorContent({
 
       if (!hasReading) {
         setSensorStatus(
-          "Unsupported device: accelerometer returned null coordinates. Open this page over HTTPS on a smartphone."
+          "Accelerometer returned no readings. Open this page over HTTPS on a smartphone."
         );
         return;
       }
@@ -325,7 +347,6 @@ function SensorContent({
       const roundedDynG = Math.round(dynG * 1000) / 1000;
 
       const now = Date.now();
-      // Update chart & numeric UI at ~10 Hz (every 100 ms) so last ~10s = 100 points
       if (now - lastSampleUiUpdateRef.current >= 100) {
         lastSampleUiUpdateRef.current = now;
         setDynamicG(roundedDynG);
@@ -333,18 +354,20 @@ function SensorContent({
           const next = [
             ...prev,
             {
-              t: new Date(now).toLocaleTimeString(),
-              dynamicG: roundedDynG
+              timeLabel: new Date(now).toLocaleTimeString("en-GB", {
+                hourCycle: "h23"
+              }),
+              gPeak: roundedDynG
             }
           ];
           return next.length > 100 ? next.slice(next.length - 100) : next;
         });
       }
 
-      // Check threshold & local 5-second cooldown
       if (
+        sourceEnabledRef.current &&
         dynG >= thresholdRef.current &&
-        now - lastTriggerTimeRef.current >= 5000 &&
+        now - lastTriggerTimeRef.current >= cooldownMsRef.current &&
         !inFlightRef.current
       ) {
         firePhoneTrigger(dynG);
@@ -353,7 +376,7 @@ function SensorContent({
     [firePhoneTrigger]
   );
 
-  // §9.2: Inside click handler (required for iOS): requestPermission -> add devicemotion listener
+  // Required inside click handler for iOS DeviceMotionEvent.requestPermission()
   const handleStartSensor = async () => {
     if (typeof window === "undefined") return;
 
@@ -362,16 +385,12 @@ function SensorContent({
       window.location.hostname !== "localhost" &&
       window.location.hostname !== "127.0.0.1"
     ) {
-      setSensorStatus(
-        "Error: DeviceMotion requires a secure HTTPS context (e.g. your *.workers.dev URL)."
-      );
+      setSensorStatus("Device motion requires an HTTPS connection.");
       return;
     }
 
     if (typeof window.DeviceMotionEvent === "undefined") {
-      setSensorStatus(
-        "Unsupported device: DeviceMotionEvent API is not available in this browser."
-      );
+      setSensorStatus("Device motion is not supported in this browser.");
       return;
     }
 
@@ -382,15 +401,15 @@ function SensorContent({
         const permState = await DM.requestPermission();
         if (permState !== "granted") {
           setSensorStatus(
-            "Permission denied: iOS motion & orientation access was rejected. Reload the page to request again."
+            "Motion permission was denied. Reload the page to request again."
           );
           return;
         }
       } catch (err) {
         setSensorStatus(
-          `Failed to request iOS motion permission: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`
+          err instanceof Error
+            ? err.message
+            : "Failed to request motion permission."
         );
         return;
       }
@@ -400,7 +419,7 @@ function SensorContent({
     window.addEventListener("devicemotion", handleMotionEvent);
     runningRef.current = true;
     setRunning(true);
-    setSensorStatus("Sensor active — shake or tilt phone to simulate wave input.");
+    setSensorStatus("Listening for motion above threshold.");
     await acquireWakeLock();
   };
 
@@ -408,7 +427,7 @@ function SensorContent({
     window.removeEventListener("devicemotion", handleMotionEvent);
     runningRef.current = false;
     setRunning(false);
-    setSensorStatus("Sensor stopped.");
+    setSensorStatus("Stopped.");
     await releaseWakeLock();
   }, [handleMotionEvent, releaseWakeLock]);
 
@@ -420,119 +439,81 @@ function SensorContent({
   }, [handleMotionEvent, releaseWakeLock]);
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-        {/* Header */}
-        <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
+    <div className="min-h-screen bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+        <header className="flex items-center justify-between gap-3 pb-4 border-b border-neutral-200 dark:border-neutral-800">
           <div className="flex items-center gap-3">
             <Link
-              href="/"
-              className="p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-              title="Back to Dashboard"
+              href="/sensors"
+              className="p-2 rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-900"
+              aria-label="Back to Sensors"
             >
-              <ArrowLeft className="w-5 h-5" />
+              <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
             </Link>
             <div>
-              <h1 className="text-lg sm:text-xl font-bold">
-                Phone Motion Trigger (simulated wave input)
-              </h1>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Simulates the ESP32 accelerometer webhook over HTTPS; not claimed as a validated wave detector.
+              <h1 className="text-xl font-semibold">Phone sensor</h1>
+              <p className="text-xs text-neutral-500">
+                Uses your phone accelerometer to trigger feeding when vibration exceeds the threshold.
               </p>
             </div>
           </div>
-
-          <TokenStatusButton onClear={onClearToken} />
         </header>
 
-        {/* Sensor Control & Status Card */}
-        <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Smartphone className="w-5 h-5 text-purple-500" />
-              <span className="text-sm font-semibold">{sensorStatus}</span>
+        {!sourceEnabled && (
+          <Card className="border-red-600 dark:border-red-500">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-red-600 dark:text-red-500 font-medium">
+                Phone sensor is turned off in Feeding settings
+              </p>
+              <Link href="/feeding">
+                <Button variant="secondary" size="sm">
+                  Feeding settings
+                </Button>
+              </Link>
             </div>
+          </Card>
+        )}
 
-            <div className="flex items-center gap-2">
-              {wakeLockActive && (
-                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-400 text-xs font-medium">
-                  <Sun className="w-3.5 h-3.5" />
-                  Wake Lock On
-                </span>
-              )}
+        <Card className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <StatusDot
+              tone={running ? "active" : "neutral"}
+              label={sensorStatus}
+            />
+            <div className="flex items-center gap-3 text-xs text-neutral-500 tabular-nums">
+              {wakeLockActive && <span>Screen awake</span>}
               {cooldownRemainingMs > 0 && (
-                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-400 text-xs font-mono font-bold">
-                  Cooldown: {(cooldownRemainingMs / 1000).toFixed(1)}s
-                </span>
+                <span>Cooldown {(cooldownRemainingMs / 1000).toFixed(1)} s</span>
               )}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {!running ? (
-              <button
-                type="button"
-                onClick={handleStartSensor}
-                className="w-full py-3 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
-              >
-                <Play className="w-4 h-4" />
-                Start Sensor
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleStopSensor}
-                className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
-              >
-                <Square className="w-4 h-4" />
-                Stop Sensor
-              </button>
-            )}
-
-            <div>
-              <label className="block text-[11px] text-slate-500 mb-1">
-                Experiment <code className="font-mono">run_label</code>
-              </label>
-              <input
-                type="text"
-                value={runLabel}
-                onChange={(e) => setRunLabel(e.target.value)}
-                placeholder="phone-wifi"
-                className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-xs font-mono"
-              />
-            </div>
-          </div>
-
-          {/* Live Readout & Threshold Slider */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2">
-            <div className="rounded-xl bg-slate-50 dark:bg-slate-950 p-3 border border-slate-200 dark:border-slate-800">
-              <div className="text-[11px] text-slate-500">
-                Dynamic Accel (gravity removed)
-              </div>
-              <div
-                className={`text-2xl font-bold font-mono mt-0.5 ${
-                  dynamicG >= thresholdG
-                    ? "text-rose-500"
-                    : "text-purple-500"
-                }`}
-              >
+          {/* Large current g value + portions per trigger (read-only) + threshold slider */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+            <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
+              <div className="text-xs text-neutral-500">Vibration</div>
+              <div className="text-3xl font-semibold tabular-nums mt-1">
                 {dynamicG.toFixed(2)} g
               </div>
             </div>
 
-            <div className="rounded-xl bg-slate-50 dark:bg-slate-950 p-3 border border-slate-200 dark:border-slate-800">
-              <div className="text-[11px] text-slate-500">
-                Raw Total G (with gravity)
+            <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
+              <div className="text-xs text-neutral-500">
+                Portions per trigger
               </div>
-              <div className="text-2xl font-bold font-mono mt-0.5 text-slate-600 dark:text-slate-300">
-                {rawTotalG.toFixed(2)} g
+              <div className="text-xl font-semibold tabular-nums mt-1">
+                {portionsPerTrigger}{" "}
+                {portionsPerTrigger === 1 ? "portion" : "portions"}
+              </div>
+              <div className="text-xs text-neutral-500 mt-1">
+                Set on the Feeding page · {cooldownSeconds} s cooldown
               </div>
             </div>
 
-            <div className="col-span-2 sm:col-span-1 rounded-xl bg-slate-50 dark:bg-slate-950 p-3 border border-slate-200 dark:border-slate-800">
-              <div className="flex items-center justify-between text-[11px] text-slate-500">
-                <span>Trigger Threshold</span>
-                <span className="font-mono font-bold text-amber-500">
+            <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
+              <div className="flex items-center justify-between text-xs text-neutral-500">
+                <span>Threshold</span>
+                <span className="font-medium text-neutral-900 dark:text-neutral-100 tabular-nums">
                   {thresholdG.toFixed(2)} g
                 </span>
               </div>
@@ -543,134 +524,93 @@ function SensorContent({
                 step="0.05"
                 value={thresholdG}
                 onChange={(e) => setThresholdG(Number(e.target.value))}
-                className="w-full mt-2 accent-purple-500"
+                className="w-full mt-3 accent-neutral-900 dark:accent-neutral-100"
               />
-              <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                <span>0.05g</span>
-                <span>0.30g</span>
-                <span>2.00g</span>
-              </div>
             </div>
           </div>
 
-          {/* Rolling 10s Chart */}
-          <div className="h-48 w-full pt-2">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart
-                data={samples}
-                margin={{ top: 8, right: 16, left: -10, bottom: 4 }}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+            <Input
+              id="phone-test-label"
+              label="Test label (optional)"
+              value={testLabel}
+              onChange={(e) => setTestLabel(e.target.value)}
+              placeholder="phone-wifi"
+            />
+            {!running ? (
+              <Button onClick={handleStartSensor} className="w-full">
+                Start
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                onClick={handleStopSensor}
+                className="w-full"
               >
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="rgba(148, 163, 184, 0.2)"
-                />
-                <XAxis dataKey="t" hide />
-                <YAxis
-                  domain={[0, Math.max(1.0, Math.ceil(thresholdG * 1.5 * 10) / 10)]}
-                  tick={{ fontSize: 11 }}
-                  tickFormatter={(v) => `${v}g`}
-                />
-                <ReferenceLine
-                  y={thresholdG}
-                  stroke="#f59e0b"
-                  strokeDasharray="4 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Threshold (${thresholdG.toFixed(2)}g)`,
-                    position: "insideTopRight",
-                    fill: "#f59e0b",
-                    fontSize: 11
-                  }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="dynamicG"
-                  stroke="#a855f7"
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-
-        {/* Recent Trigger Log */}
-        <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold flex items-center gap-2">
-              <Activity className="w-4 h-4 text-purple-500" />
-              Recent Phone Motion Triggers
-            </h2>
-            <span className="text-xs font-mono text-slate-500">
-              {triggers.length} events
-            </span>
+                Stop
+              </Button>
+            )}
           </div>
 
+          <LiveChart
+            data={samples}
+            thresholdG={thresholdG}
+            heightClass="h-44"
+          />
+        </Card>
+
+        <Card>
+          <SectionHeader
+            title="Recent triggers"
+            description="Result and round-trip latency for triggers fired in this session."
+          />
           {triggers.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-500 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-              No triggers fired in this session yet. Start the sensor and shake your phone above{" "}
-              <span className="font-mono font-semibold">
-                {thresholdG.toFixed(2)} g
-              </span>
-              .
-            </div>
+            <EmptyState
+              title="No triggers fired yet"
+              description="Press Start and move your phone above the vibration threshold."
+            />
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-100 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 uppercase">
-                  <tr>
-                    <th className="py-2 px-3">Time</th>
-                    <th className="py-2 px-3 text-right">Dynamic G</th>
-                    <th className="py-2 px-3 text-right">Client RTT</th>
-                    <th className="py-2 px-3 text-right">Server</th>
-                    <th className="py-2 px-3 text-right">Tuya API</th>
-                    <th className="py-2 px-3">Result</th>
+            <Table>
+              <THead>
+                <tr>
+                  <Th>Time</Th>
+                  <Th className="text-right">Vibration</Th>
+                  <Th className="text-right">Total (ms)</Th>
+                  <Th className="text-right">Server (ms)</Th>
+                  <Th className="text-right">Feeder API (ms)</Th>
+                  <Th>Result</Th>
+                </tr>
+              </THead>
+              <tbody className="tabular-nums">
+                {triggers.map((t) => (
+                  <tr key={t.id}>
+                    <Td className="text-xs text-neutral-500">{t.time}</Td>
+                    <Td className="text-right">{t.vibrationG.toFixed(2)} g</Td>
+                    <Td className="text-right">
+                      {t.clientRttMs !== null ? `${t.clientRttMs} ms` : "—"}
+                    </Td>
+                    <Td className="text-right">
+                      {t.serverTotalMs !== null ? `${t.serverTotalMs} ms` : "—"}
+                    </Td>
+                    <Td className="text-right">
+                      {t.tuyaApiMs !== null ? `${t.tuyaApiMs} ms` : "—"}
+                    </Td>
+                    <Td
+                      className={
+                        t.status === "ERROR"
+                          ? "text-red-600 dark:text-red-500 font-medium"
+                          : ""
+                      }
+                    >
+                      {t.detail}
+                    </Td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800 font-mono">
-                  {triggers.map((t) => (
-                    <tr key={t.id}>
-                      <td className="py-2 px-3">{t.time}</td>
-                      <td className="py-2 px-3 text-right font-semibold text-purple-400">
-                        {t.vibrationG.toFixed(2)} g
-                      </td>
-                      <td className="py-2 px-3 text-right font-bold text-sky-400">
-                        {t.clientRttMs !== null ? `${t.clientRttMs} ms` : "—"}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        {t.serverTotalMs !== null
-                          ? `${t.serverTotalMs} ms`
-                          : "—"}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        {t.tuyaApiMs !== null ? `${t.tuyaApiMs} ms` : "—"}
-                      </td>
-                      <td className="py-2 px-3 font-sans">
-                        {t.status === "OK" ? (
-                          <span className="text-emerald-500 font-semibold">
-                            OK • {t.detail}
-                          </span>
-                        ) : t.status === "COOLDOWN" ? (
-                          <span className="text-amber-500 font-semibold">
-                            429 {t.detail}
-                          </span>
-                        ) : (
-                          <span className="text-rose-500 font-semibold flex items-center gap-1">
-                            <ShieldAlert className="w-3.5 h-3.5" />
-                            {t.detail}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </Table>
           )}
-        </section>
+        </Card>
       </div>
     </div>
   );
 }
-

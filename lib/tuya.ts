@@ -1,5 +1,5 @@
 import "server-only";
-import type { TuyaEndpoint } from "./supabase";
+import type { TuyaEndpoint } from "./supabase-server";
 
 const EMPTY_BODY_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -16,6 +16,8 @@ export interface FeedOnceResult {
   endpoint: TuyaEndpoint | null;
   tuyaApiMs: number | null;
   tokenRefreshed: boolean;
+  fallbackReason: string | null;
+  portionsSent: number;
   error?: string;
 }
 
@@ -163,12 +165,10 @@ async function getValidAccessToken(
 }
 
 function isTokenInvalidCode(code?: number): boolean {
-  // Tuya OpenAPI token invalid / expired codes: 1010 (token is expired), 1011, 1012
   return code === 1010 || code === 1011 || code === 1012;
 }
 
 function isAuthErrorCode(code?: number): boolean {
-  // 1004 = sign invalid, 1010-1012 = token invalid, 1106 = permission denied
   return (
     code === 1004 ||
     code === 1010 ||
@@ -222,13 +222,59 @@ async function issueTuyaPostCommand(
   return { json, elapsedMs, httpStatus: response.status };
 }
 
-export async function feedOnce(): Promise<FeedOnceResult> {
+async function issueTuyaGetRequest<T = unknown>(
+  pathWithQuery: string,
+  accessToken: string
+): Promise<{ json: TuyaResponse<T>; elapsedMs: number; httpStatus: number }> {
+  const { clientId, clientSecret, baseUrl } = getTuyaConfig();
+  const t = String(Date.now());
+  const nonce = "";
+  const stringToSign = await buildStringToSign("GET", "", pathWithQuery);
+  const payloadToSign = `${clientId}${accessToken}${t}${nonce}${stringToSign}`;
+  const sign = await hmacSha256UpperHex(clientSecret, payloadToSign);
+
+  const start = Date.now();
+  const response = await fetch(`${baseUrl}${pathWithQuery}`, {
+    method: "GET",
+    headers: {
+      client_id: clientId,
+      access_token: accessToken,
+      sign,
+      t,
+      sign_method: "HMAC-SHA256",
+      nonce
+    },
+    cache: "no-store"
+  });
+  const elapsedMs = Date.now() - start;
+
+  let json: TuyaResponse<T> = {};
+  try {
+    json = (await response.json()) as TuyaResponse<T>;
+  } catch {
+    json = {
+      success: false,
+      code: response.status,
+      msg: `Non-JSON response from Tuya (HTTP ${response.status})`
+    };
+  }
+  return { json, elapsedMs, httpStatus: response.status };
+}
+
+/**
+ * Sends a single `manual_feed` command with `value = commandValue` (1..31 per device spec).
+ * Uses v2 shadow properties issue first, falling back to v1 commands and recording `fallbackReason`.
+ */
+export async function feedOnce(commandValue: number = 1): Promise<FeedOnceResult> {
+  const safeVal = Math.max(1, Math.min(31, Math.round(commandValue)));
   if (!isTuyaConfigured()) {
     return {
       success: false,
       endpoint: null,
       tuyaApiMs: null,
       tokenRefreshed: false,
+      fallbackReason: null,
+      portionsSent: 0,
       error: "Tuya credentials are not configured on the server."
     };
   }
@@ -247,12 +293,14 @@ export async function feedOnce(): Promise<FeedOnceResult> {
       endpoint: null,
       tuyaApiMs: null,
       tokenRefreshed: true,
+      fallbackReason: null,
+      portionsSent: 0,
       error: err instanceof Error ? err.message : "Failed to fetch Tuya token"
     };
   }
 
   const shadowPath = `/v2.0/cloud/thing/${encodeURIComponent(deviceId)}/shadow/properties/issue`;
-  const shadowBody = { properties: JSON.stringify({ manual_feed: 1 }) };
+  const shadowBody = { properties: JSON.stringify({ manual_feed: safeVal }) };
 
   let primaryAttempt = await issueTuyaPostCommand(
     shadowPath,
@@ -260,7 +308,6 @@ export async function feedOnce(): Promise<FeedOnceResult> {
     accessToken
   );
 
-  // If token expired mid-flight (e.g. code 1010), refresh once and retry once
   if (!primaryAttempt.json.success && isTokenInvalidCode(primaryAttempt.json.code)) {
     try {
       const refreshedTokenInfo = await getValidAccessToken(true);
@@ -277,6 +324,8 @@ export async function feedOnce(): Promise<FeedOnceResult> {
         endpoint: "v2_shadow",
         tuyaApiMs: primaryAttempt.elapsedMs,
         tokenRefreshed: true,
+        fallbackReason: null,
+        portionsSent: 0,
         error:
           err instanceof Error
             ? err.message
@@ -290,23 +339,28 @@ export async function feedOnce(): Promise<FeedOnceResult> {
       success: true,
       endpoint: "v2_shadow",
       tuyaApiMs: primaryAttempt.elapsedMs,
-      tokenRefreshed
+      tokenRefreshed,
+      fallbackReason: null,
+      portionsSent: safeVal
     };
   }
 
-  // Only fallback to v1_commands if primary returned success: false for a non-auth reason
+  const v2Reason = `v2_shadow [${primaryAttempt.json.code ?? primaryAttempt.httpStatus}]: ${primaryAttempt.json.msg ?? "unknown error"}`;
+
   if (isAuthErrorCode(primaryAttempt.json.code)) {
     return {
       success: false,
       endpoint: "v2_shadow",
       tuyaApiMs: primaryAttempt.elapsedMs,
       tokenRefreshed,
+      fallbackReason: null,
+      portionsSent: 0,
       error: `Tuya v2_shadow auth error (code ${primaryAttempt.json.code ?? primaryAttempt.httpStatus}): ${primaryAttempt.json.msg ?? "Authentication failed"}`
     };
   }
 
   const v1Path = `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/commands`;
-  const v1Body = { commands: [{ code: "manual_feed", value: 1 }] };
+  const v1Body = { commands: [{ code: "manual_feed", value: safeVal }] };
 
   const fallbackAttempt = await issueTuyaPostCommand(
     v1Path,
@@ -318,113 +372,225 @@ export async function feedOnce(): Promise<FeedOnceResult> {
     return {
       success: true,
       endpoint: "v1_commands",
-      tuyaApiMs: fallbackAttempt.elapsedMs,
-      tokenRefreshed
+      tuyaApiMs: primaryAttempt.elapsedMs + fallbackAttempt.elapsedMs,
+      tokenRefreshed,
+      fallbackReason: v2Reason,
+      portionsSent: safeVal
     };
   }
 
   return {
     success: false,
     endpoint: "v1_commands",
-    tuyaApiMs: fallbackAttempt.elapsedMs,
+    tuyaApiMs: primaryAttempt.elapsedMs + fallbackAttempt.elapsedMs,
     tokenRefreshed,
-    error: `Tuya feed failed. v2_shadow: [${primaryAttempt.json.code ?? primaryAttempt.httpStatus}] ${primaryAttempt.json.msg ?? "error"}; v1_commands: [${fallbackAttempt.json.code ?? fallbackAttempt.httpStatus}] ${fallbackAttempt.json.msg ?? "error"}`
+    fallbackReason: v2Reason,
+    portionsSent: 0,
+    error: `Tuya feed failed. ${v2Reason}; v1_commands: [${fallbackAttempt.json.code ?? fallbackAttempt.httpStatus}] ${fallbackAttempt.json.msg ?? "error"}`
   };
 }
 
-export interface TuyaHardwareSensorStatus {
-  lowFoodSensorTriggered: boolean | null; // DP 6 ("status"): "YES" = low food, "NO" = normal
-  rawStatusValue: string | null;
-  reminderSwitchEnabled: boolean | null; // DP 25 ("switch"): 缺料提醒开关
-  updatedAtMs: number | null;
-}
+/**
+ * Dispenses `totalPortions` portions.
+ * Device specification for `manual_feed` supports 1..maxPerCommand (default 31) in a single command.
+ * Splits into sequential commands only if `totalPortions > maxPerCommand`.
+ */
+export async function feedPortions(
+  totalPortions: number,
+  maxPerCommand: number = 31
+): Promise<FeedOnceResult> {
+  const safeMax = Math.max(1, Math.min(31, maxPerCommand || 31));
+  const target = Math.max(1, Math.round(totalPortions));
 
-// Cache shadow reads so dashboard polling (every 3 s) doesn't burn Tuya API quota.
-const HW_STATUS_TTL_MS = 15_000;
-let hwStatusCache: { value: TuyaHardwareSensorStatus; fetchedAt: number } | null = null;
-
-export async function getTuyaHardwareStatus(): Promise<TuyaHardwareSensorStatus> {
-  if (hwStatusCache && Date.now() - hwStatusCache.fetchedAt < HW_STATUS_TTL_MS) {
-    return hwStatusCache.value;
+  if (target <= safeMax) {
+    return feedOnce(target);
   }
-  const value = await fetchTuyaHardwareStatus();
-  hwStatusCache = { value, fetchedAt: Date.now() };
-  return value;
+
+  let remaining = target;
+  let totalTuyaMs = 0;
+  let anyTokenRefreshed = false;
+  let usedEndpoint: TuyaEndpoint | null = "v2_shadow";
+  let fallbackReason: string | null = null;
+  let dispensed = 0;
+
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, safeMax);
+    const step = await feedOnce(chunk);
+    if (step.tuyaApiMs !== null) {
+      totalTuyaMs += step.tuyaApiMs;
+    }
+    if (step.tokenRefreshed) anyTokenRefreshed = true;
+    if (step.endpoint === "v1_commands") usedEndpoint = "v1_commands";
+    if (step.fallbackReason && !fallbackReason) {
+      fallbackReason = step.fallbackReason;
+    }
+    if (!step.success) {
+      return {
+        success: false,
+        endpoint: step.endpoint ?? usedEndpoint,
+        tuyaApiMs: totalTuyaMs || null,
+        tokenRefreshed: anyTokenRefreshed,
+        fallbackReason,
+        portionsSent: dispensed,
+        error: step.error
+      };
+    }
+    dispensed += chunk;
+    remaining -= chunk;
+  }
+
+  return {
+    success: true,
+    endpoint: usedEndpoint,
+    tuyaApiMs: totalTuyaMs,
+    tokenRefreshed: anyTokenRefreshed,
+    fallbackReason,
+    portionsSent: dispensed
+  };
 }
 
-async function fetchTuyaHardwareStatus(): Promise<TuyaHardwareSensorStatus> {
+export interface TuyaFullDeviceStatus {
+  configured: boolean;
+  online: boolean | null;
+  lowFood: boolean | null; // DP code "status": "YES" => low food (true), "NO" => sufficient (false)
+  rawStatusValue: string | null;
+  manualFeedMin: number;
+  manualFeedMax: number;
+  deviceName: string | null;
+  checkedAtIso: string;
+  error?: string;
+}
+
+/**
+ * Read-only query of Tuya device online state, DP `status` ("NO" / "YES" low-food sensor),
+ * and `manual_feed` specification range. NEVER sends a feed command.
+ */
+export async function fetchTuyaDeviceStatusAndSpec(): Promise<TuyaFullDeviceStatus> {
+  const checkedAtIso = new Date().toISOString();
   if (!isTuyaConfigured()) {
     return {
-      lowFoodSensorTriggered: null,
+      configured: false,
+      online: null,
+      lowFood: null,
       rawStatusValue: null,
-      reminderSwitchEnabled: null,
-      updatedAtMs: null
+      manualFeedMin: 1,
+      manualFeedMax: 31,
+      deviceName: null,
+      checkedAtIso,
+      error: "Tuya credentials are not configured."
     };
   }
 
   try {
-    const { clientId, clientSecret, deviceId, baseUrl } = getTuyaConfig();
-    const { accessToken } = await getValidAccessToken(false);
-    const pathWithQuery = `/v2.0/cloud/thing/${encodeURIComponent(deviceId)}/shadow/properties`;
-    const t = String(Date.now());
-    const nonce = "";
-    const stringToSign = await buildStringToSign("GET", "", pathWithQuery);
-    const payloadToSign = `${clientId}${accessToken}${t}${nonce}${stringToSign}`;
-    const sign = await hmacSha256UpperHex(clientSecret, payloadToSign);
+    const { deviceId } = getTuyaConfig();
+    let { accessToken } = await getValidAccessToken(false);
 
-    const response = await fetch(`${baseUrl}${pathWithQuery}`, {
-      method: "GET",
-      headers: {
-        client_id: clientId,
-        access_token: accessToken,
-        sign,
-        t,
-        sign_method: "HMAC-SHA256",
-        nonce
-      },
-      cache: "no-store"
-    });
+    const devPath = `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}`;
+    let devRes = await issueTuyaGetRequest<{
+      online?: boolean;
+      name?: string;
+    }>(devPath, accessToken);
 
-    const json = (await response.json()) as TuyaResponse<{
-      properties?: Array<{
-        code: string;
-        dp_id: number;
-        value: unknown;
-        time: number;
-      }>;
-    }>;
+    if (!devRes.json.success && isTokenInvalidCode(devRes.json.code)) {
+      const refreshed = await getValidAccessToken(true);
+      accessToken = refreshed.accessToken;
+      devRes = await issueTuyaGetRequest(devPath, accessToken);
+    }
 
-    const props = json?.result?.properties;
-    if (!json.success || !Array.isArray(props)) {
+    const statusPath = `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/status`;
+    const specPath = `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/specification`;
+
+    const [statusRes, specRes] = await Promise.all([
+      issueTuyaGetRequest<Array<{ code: string; value: unknown }>>(
+        statusPath,
+        accessToken
+      ),
+      issueTuyaGetRequest<{
+        functions?: Array<{ code: string; values?: string }>;
+      }>(specPath, accessToken)
+    ]);
+
+    const online =
+      typeof devRes.json.result?.online === "boolean"
+        ? devRes.json.result.online
+        : null;
+    const deviceName = devRes.json.result?.name ?? null;
+
+    let rawStatusValue: string | null = null;
+    let lowFood: boolean | null = null;
+
+    if (Array.isArray(statusRes.json.result)) {
+      // Device specification uses DP code "status" (Enum: ["NO", "YES"]) for 余粮状态 (food level status)
+      const statusItem = statusRes.json.result.find((d) => d.code === "status");
+      if (statusItem && statusItem.value !== undefined) {
+        rawStatusValue = String(statusItem.value);
+        lowFood =
+          rawStatusValue === "YES"
+            ? true
+            : rawStatusValue === "NO"
+              ? false
+              : null;
+      }
+    }
+
+    let manualFeedMin = 1;
+    let manualFeedMax = 31;
+    const funcs = specRes.json.result?.functions;
+    if (Array.isArray(funcs)) {
+      const mf = funcs.find((f) => f.code === "manual_feed");
+      if (mf?.values) {
+        try {
+          const parsed = JSON.parse(mf.values) as {
+            min?: number;
+            max?: number;
+          };
+          if (typeof parsed.min === "number" && parsed.min >= 1) {
+            manualFeedMin = parsed.min;
+          }
+          if (typeof parsed.max === "number" && parsed.max >= manualFeedMin) {
+            manualFeedMax = parsed.max;
+          }
+        } catch {
+          // keep defaults 1..31
+        }
+      }
+    }
+
+    if (!devRes.json.success && !statusRes.json.success) {
       return {
-        lowFoodSensorTriggered: null,
+        configured: true,
+        online: null,
+        lowFood: null,
         rawStatusValue: null,
-        reminderSwitchEnabled: null,
-        updatedAtMs: null
+        manualFeedMin,
+        manualFeedMax,
+        deviceName: null,
+        checkedAtIso,
+        error: `Tuya error [${devRes.json.code ?? devRes.httpStatus}]: ${devRes.json.msg ?? "Failed to read device"}`
       };
     }
 
-    const statusDp = props.find((p) => p.code === "status" || p.dp_id === 6);
-    const switchDp = props.find((p) => p.code === "switch" || p.dp_id === 25);
-    const rawVal =
-      statusDp?.value !== undefined ? String(statusDp.value) : null;
-
     return {
-      lowFoodSensorTriggered:
-        rawVal === "YES" ? true : rawVal === "NO" ? false : null,
-      rawStatusValue: rawVal,
-      reminderSwitchEnabled:
-        typeof switchDp?.value === "boolean" ? switchDp.value : null,
-      updatedAtMs: typeof statusDp?.time === "number" ? statusDp.time : null
+      configured: true,
+      online,
+      lowFood,
+      rawStatusValue,
+      manualFeedMin,
+      manualFeedMax,
+      deviceName,
+      checkedAtIso
     };
-  } catch {
+  } catch (err) {
     return {
-      lowFoodSensorTriggered: null,
+      configured: true,
+      online: null,
+      lowFood: null,
       rawStatusValue: null,
-      reminderSwitchEnabled: null,
-      updatedAtMs: null
+      manualFeedMin: 1,
+      manualFeedMax: 31,
+      deviceName: null,
+      checkedAtIso,
+      error: err instanceof Error ? err.message : "Failed to query Tuya device"
     };
   }
 }
-
-

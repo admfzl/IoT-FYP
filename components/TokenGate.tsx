@@ -1,117 +1,226 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { KeyRound, Lock, LogOut } from "lucide-react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+  useRef
+} from "react";
+import { Button, Input } from "./ui";
 
 export const TOKEN_STORAGE_KEY = "fish_feeder_api_token";
+export const THEME_STORAGE_KEY = "fish_feeder_theme";
 
-interface TokenGateProps {
-  children: (
-    token: string,
-    clearToken: () => void
-  ) => React.ReactNode;
+export type ThemeChoice = "system" | "light" | "dark";
+
+interface TokenContextValue {
+  token: string;
+  setToken: (t: string) => void;
+  clearToken: () => void;
+  theme: ThemeChoice;
+  setTheme: (t: ThemeChoice) => void;
 }
 
-export function TokenGate({ children }: TokenGateProps) {
-  const [token, setToken] = useState<string | null>(null);
+const TokenContext = createContext<TokenContextValue | null>(null);
+
+export function useDashboardAuth(): TokenContextValue {
+  const ctx = useContext(TokenContext);
+  if (!ctx) {
+    throw new Error("useDashboardAuth must be used inside TokenGate");
+  }
+  return ctx;
+}
+
+export function TokenGate({
+  children
+}: {
+  children:
+    | React.ReactNode
+    | ((token: string, clearToken: () => void) => React.ReactNode);
+}) {
+  const [token, setTokenState] = useState<string | null>(null);
   const [inputVal, setInputVal] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [theme, setThemeState] = useState<ThemeChoice>("system");
+  const seenNotifIdsRef = useRef<Set<number>>(new Set());
+
+  const applyThemeClass = useCallback((choice: ThemeChoice) => {
+    if (typeof window === "undefined") return;
+    const root = document.documentElement;
+    const prefersDark = window.matchMedia(
+      "(prefers-color-scheme: dark)"
+    ).matches;
+    const isDark =
+      choice === "dark" || (choice === "system" && prefersDark);
+    if (isDark) {
+      root.classList.add("dark");
+    } else {
+      root.classList.remove("dark");
+    }
+  }, []);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (saved && saved.trim().length > 0) {
-      setToken(saved.trim());
+    const savedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (savedToken && savedToken.trim().length > 0) {
+      setTokenState(savedToken.trim());
     }
+    const savedTheme = window.localStorage.getItem(
+      THEME_STORAGE_KEY
+    ) as ThemeChoice | null;
+    const initialTheme: ThemeChoice =
+      savedTheme === "light" || savedTheme === "dark" || savedTheme === "system"
+        ? savedTheme
+        : "system";
+    setThemeState(initialTheme);
+    applyThemeClass(initialTheme);
     setMounted(true);
+
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const listener = () => {
+      const current =
+        (window.localStorage.getItem(THEME_STORAGE_KEY) as ThemeChoice) ||
+        "system";
+      if (current === "system") applyThemeClass("system");
+    };
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
+  }, [applyThemeClass]);
+
+  const setToken = useCallback((next: string) => {
+    const cleaned = next.trim();
+    if (!cleaned) return;
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, cleaned);
+    setTokenState(cleaned);
   }, []);
+
+  const clearToken = useCallback(() => {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+    setTokenState(null);
+  }, []);
+
+  const setTheme = useCallback(
+    (choice: ThemeChoice) => {
+      window.localStorage.setItem(THEME_STORAGE_KEY, choice);
+      setThemeState(choice);
+      applyThemeClass(choice);
+    },
+    [applyThemeClass]
+  );
+
+  // Poll active notifications for browser Notification API delivery (§3.8, §6.4)
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+
+    const checkAlerts = async () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+      try {
+        const res = await fetch("/api/notifications?status=active", {
+          cache: "no-store"
+        });
+        if (!res.ok || !active) return;
+        const data = (await res.json()) as {
+          notifications?: Array<{
+            id: number;
+            type: string;
+            message: string;
+          }>;
+          settings?: { notify_browser?: boolean };
+        };
+        const list = data.notifications ?? [];
+        const browserEnabled = data.settings?.notify_browser !== false;
+
+        for (const item of list) {
+          if (!seenNotifIdsRef.current.has(item.id)) {
+            seenNotifIdsRef.current.add(item.id);
+            if (
+              browserEnabled &&
+              typeof window !== "undefined" &&
+              "Notification" in window &&
+              Notification.permission === "granted"
+            ) {
+              try {
+                new Notification("Fish Feeder", { body: item.message });
+              } catch {
+                // ignore notification constructor errors on mobile browsers
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore transient network error
+      }
+    };
+
+    checkAlerts();
+    const timer = setInterval(checkAlerts, 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [token]);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     const cleaned = inputVal.trim();
     if (!cleaned) return;
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, cleaned);
     setToken(cleaned);
     setInputVal("");
   };
 
-  const clearToken = () => {
-    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-    setToken(null);
-  };
-
   if (!mounted) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-6">
-        <div className="text-sm text-slate-400">Loading security gate...</div>
+      <div className="min-h-screen flex items-center justify-center p-6 bg-white dark:bg-neutral-950">
+        <div className="text-xs text-neutral-500">Loading...</div>
       </div>
     );
   }
 
   if (!token) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-950">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-xl">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500">
-              <Lock className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold">Feeder Access Token</h1>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Smart Fish Feeder Actuation &amp; Latency Study (FYP II)
-              </p>
-            </div>
+      <div className="min-h-screen flex items-center justify-center p-4 bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
+        <div className="w-full max-w-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-6 space-y-4">
+          <div>
+            <h1 className="text-xl font-semibold">Fish Feeder</h1>
+            <p className="text-xs text-neutral-500 mt-1">
+              Enter your access token to view and control the feeder.
+            </p>
           </div>
 
-          <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
-            Enter your shared <code className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-xs">FEED_API_TOKEN</code> to authorize actuation and configuration calls. It will be stored in this browser&apos;s <code className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-xs">localStorage</code> and sent in the <code className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-xs">x-feed-token</code> header.
-          </p>
-
           <form onSubmit={handleSave} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
-                API Token / PIN
-              </label>
-              <div className="relative">
-                <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="password"
-                  value={inputVal}
-                  onChange={(e) => setInputVal(e.target.value)}
-                  placeholder="Enter FEED_API_TOKEN..."
-                  autoFocus
-                  required
-                  className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-2.5 px-4 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm transition"
-            >
-              Unlock Feeder Controls
-            </button>
+            <Input
+              id="access-token-input"
+              label="Access token"
+              type="password"
+              value={inputVal}
+              onChange={(e) => setInputVal(e.target.value)}
+              placeholder="Enter access token"
+              autoFocus
+              required
+            />
+            <Button type="submit" className="w-full">
+              Continue
+            </Button>
           </form>
         </div>
       </div>
     );
   }
 
-  return <>{children(token, clearToken)}</>;
-}
-
-export function TokenStatusButton({ onClear }: { onClear: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onClear}
-      title="Clear stored x-feed-token from localStorage"
-      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+    <TokenContext.Provider
+      value={{ token, setToken, clearToken, theme, setTheme }}
     >
-      <LogOut className="w-3.5 h-3.5" />
-      Change Token
-    </button>
+      {typeof children === "function"
+        ? children(token, clearToken)
+        : children}
+    </TokenContext.Provider>
   );
 }
-

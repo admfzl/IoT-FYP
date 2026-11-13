@@ -3,10 +3,46 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+  --chart-line: #171717;
+  --chart-axis: #737373;
+  --chart-grid: #e5e5e5;
+  --chart-bg: #ffffff;
+  --chart-border: #d4d4d4;
+  --chart-critical: #dc2626;
+  --bar-1: #171717;
+  --bar-2: #737373;
+  --bar-3: #d4d4d4;
+}
+
+html.dark {
+  color-scheme: dark;
+  --chart-line: #f5f5f5;
+  --chart-axis: #a3a3a3;
+  --chart-grid: #262626;
+  --chart-bg: #0a0a0a;
+  --chart-border: #404040;
+  --chart-critical: #ef4444;
+  --bar-1: #f5f5f5;
+  --bar-2: #737373;
+  --bar-3: #404040;
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased;
+  @apply bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100 antialiased font-sans;
 }
 
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+  }
+}
