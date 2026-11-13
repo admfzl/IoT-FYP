@@ -50,8 +50,16 @@ let cachedClient: SupabaseClient | null = null;
 let cachedKey: string | null = null;
 
 export function getSupabaseAdmin(): SupabaseClient {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  const runtimeEnv = process.env as Record<string, string | undefined>;
+  const url = (
+    runtimeEnv["SUPABASE_URL"] ||
+    runtimeEnv["NEXT_PUBLIC_SUPABASE_URL"] ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL
+  )?.trim();
+  const serviceKey = (
+    runtimeEnv["SUPABASE_SERVICE_ROLE_KEY"] ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+  )?.trim();
 
   if (!url || !serviceKey) {
     throw new Error(

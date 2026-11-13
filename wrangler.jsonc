@@ -10,6 +10,11 @@
   },
   "observability": {
     "enabled": true
+  },
+  "vars": {
+    "NEXT_PUBLIC_SUPABASE_URL": "https://kgvzxravpwiwdrtcbzli.supabase.co",
+    "TUYA_DEVICE_ID": "a33d5216f7875b6d3er7kk",
+    "TUYA_BASE_URL": "https://openapi-sg.iotbing.com"
   }
 }
 
