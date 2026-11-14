@@ -8,7 +8,6 @@ import React, {
   useCallback,
   useRef
 } from "react";
-import { Button, Input } from "./ui";
 
 export const TOKEN_STORAGE_KEY = "fish_feeder_api_token";
 export const THEME_STORAGE_KEY = "fish_feeder_theme";
@@ -40,9 +39,7 @@ export function TokenGate({
     | React.ReactNode
     | ((token: string, clearToken: () => void) => React.ReactNode);
 }) {
-  const [token, setTokenState] = useState<string | null>(null);
-  const [inputVal, setInputVal] = useState("");
-  const [mounted, setMounted] = useState(false);
+  const [token, setTokenState] = useState<string>("");
   const [theme, setThemeState] = useState<ThemeChoice>("system");
   const seenNotifIdsRef = useRef<Set<number>>(new Set());
 
@@ -75,7 +72,6 @@ export function TokenGate({
         : "system";
     setThemeState(initialTheme);
     applyThemeClass(initialTheme);
-    setMounted(true);
 
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const listener = () => {
@@ -97,7 +93,7 @@ export function TokenGate({
 
   const clearToken = useCallback(() => {
     window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-    setTokenState(null);
+    setTokenState("");
   }, []);
 
   const setTheme = useCallback(
@@ -111,7 +107,6 @@ export function TokenGate({
 
   // Poll active notifications for browser Notification API delivery (§3.8, §6.4)
   useEffect(() => {
-    if (!token) return;
     let active = true;
 
     const checkAlerts = async () => {
@@ -165,54 +160,7 @@ export function TokenGate({
       active = false;
       clearInterval(timer);
     };
-  }, [token]);
-
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleaned = inputVal.trim();
-    if (!cleaned) return;
-    setToken(cleaned);
-    setInputVal("");
-  };
-
-  if (!mounted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-6 bg-white dark:bg-neutral-950">
-        <div className="text-xs text-neutral-500">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!token) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
-        <div className="w-full max-w-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-6 space-y-4">
-          <div>
-            <h1 className="text-xl font-semibold">Fish Feeder</h1>
-            <p className="text-xs text-neutral-500 mt-1">
-              Enter your access token to view and control the feeder.
-            </p>
-          </div>
-
-          <form onSubmit={handleSave} className="space-y-4">
-            <Input
-              id="access-token-input"
-              label="Access token"
-              type="password"
-              value={inputVal}
-              onChange={(e) => setInputVal(e.target.value)}
-              placeholder="Enter access token"
-              autoFocus
-              required
-            />
-            <Button type="submit" className="w-full">
-              Continue
-            </Button>
-          </form>
-        </div>
-      </div>
-    );
-  }
+  }, []);
 
   return (
     <TokenContext.Provider

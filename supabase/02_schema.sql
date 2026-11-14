@@ -817,3 +817,6 @@ insert into public.trigger_sources (source, enabled, portions_per_trigger, coold
   ('ESP32_SENSOR', false, 1, 5, 0.30),
   ('PHONE_SENSOR', false, 1, 5, 0.30)
 on conflict (source) do nothing;
+
+-- Reload PostgREST schema cache so all new tables and RPC functions are immediately available
+notify pgrst, 'reload schema';
