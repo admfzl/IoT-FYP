@@ -366,10 +366,16 @@ export default function FeedingPage() {
                     </Td>
                     <Td>
                       <input
+                        key={`p-${row.source}-${row.portions_per_trigger}`}
                         type="number"
                         min={1}
                         max={20}
                         defaultValue={row.portions_per_trigger}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.currentTarget.blur();
+                          }
+                        }}
                         onBlur={(e) => {
                           const v = Number(e.target.value);
                           if (
@@ -388,10 +394,16 @@ export default function FeedingPage() {
                     </Td>
                     <Td>
                       <input
+                        key={`c-${row.source}-${row.cooldown_seconds}`}
                         type="number"
                         min={0}
                         max={3600}
                         defaultValue={row.cooldown_seconds}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.currentTarget.blur();
+                          }
+                        }}
                         onBlur={(e) => {
                           const v = Number(e.target.value);
                           if (
@@ -411,21 +423,27 @@ export default function FeedingPage() {
                     <Td>
                       {isSensor ? (
                         <input
+                          key={`t-${row.source}-${row.threshold_g}`}
                           type="number"
-                          step="0.05"
-                          min={0.05}
-                          max={10}
-                          defaultValue={Number(row.threshold_g ?? 0.3)}
+                          step="0.01"
+                          min={0.01}
+                          max={16}
+                          defaultValue={Number(row.threshold_g ?? 0.3).toFixed(2)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.currentTarget.blur();
+                            }
+                          }}
                           onBlur={(e) => {
                             const v = Number(e.target.value);
                             if (
                               Number.isFinite(v) &&
-                              v > 0 &&
-                              v <= 10 &&
+                              v >= 0.01 &&
+                              v <= 16 &&
                               v !== Number(row.threshold_g)
                             ) {
                               updateSourceField(row.source, {
-                                threshold_g: v
+                                threshold_g: Math.round(v * 1000) / 1000
                               });
                             }
                           }}

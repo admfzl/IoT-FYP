@@ -224,7 +224,22 @@ void sendTelemetryBatch(const OneSecSummary *items, int count) {
   body += "]}";
 
   String resp;
-  postJsonKeepAlive(String(SERVER_URL) + "/api/esp32/telemetry", body, resp, 4000);
+  int code = postJsonKeepAlive(String(SERVER_URL) + "/api/esp32/telemetry", body, resp, 4000);
+  if (code >= 200 && code < 300) {
+    int enIdx = resp.indexOf("\"enabled\":");
+    if (enIdx >= 0) {
+      cfgEnabled = resp.substring(enIdx + 10, enIdx + 16).startsWith("true");
+    }
+    int thrIdx = resp.indexOf("\"thresholdG\":");
+    if (thrIdx >= 0) {
+      float t = resp.substring(thrIdx + 13).toFloat();
+      if (t >= 0.01f && t <= 16.0f) cfgThresholdG = t;
+    }
+    long cdMs = extractJsonInt(resp, "cooldownMs", -1);
+    if (cdMs >= 500 && cdMs <= 3600000L) {
+      cfgCooldownMs = (uint32_t)cdMs;
+    }
+  }
 }
 
 void networkTask(void *param) {

@@ -110,13 +110,50 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.rpc("ingest_telemetry", {
-    p_device_id: deviceId,
-    p_rssi: rssi,
-    p_firmware: firmware,
-    p_ip: ip,
-    p_samples: sanitizedSamples
-  });
+
+  // If the user explicitly saved new threshold/cooldown on the ESP32 local web UI (`configUpdated: true`),
+  // push those updates into `trigger_sources` for `ESP32_SENSOR`.
+  if (body.configUpdated === true) {
+    const sourcePatch: Record<string, unknown> = {
+      updated_at: new Date().toISOString()
+    };
+    if (body.thresholdG !== undefined) {
+      const t = Number(body.thresholdG);
+      if (Number.isFinite(t) && t >= 0.01 && t <= 16) {
+        sourcePatch.threshold_g = Math.round(t * 1000) / 1000;
+      }
+    }
+    if (body.cooldownMs !== undefined) {
+      const cdSec = Math.round(Number(body.cooldownMs) / 1000);
+      if (Number.isInteger(cdSec) && cdSec >= 0 && cdSec <= 86_400) {
+        sourcePatch.cooldown_seconds = cdSec;
+      }
+    }
+    if (typeof body.autoTrigger === "boolean") {
+      sourcePatch.enabled = body.autoTrigger;
+    }
+    if (Object.keys(sourcePatch).length > 1) {
+      await supabase
+        .from("trigger_sources")
+        .update(sourcePatch)
+        .eq("source", "ESP32_SENSOR");
+    }
+  }
+
+  const [{ data, error }, { data: espSource }] = await Promise.all([
+    supabase.rpc("ingest_telemetry", {
+      p_device_id: deviceId,
+      p_rssi: rssi,
+      p_firmware: firmware,
+      p_ip: ip,
+      p_samples: sanitizedSamples
+    }),
+    supabase
+      .from("trigger_sources")
+      .select("enabled, threshold_g, cooldown_seconds, portions_per_trigger")
+      .eq("source", "ESP32_SENSOR")
+      .maybeSingle()
+  ]);
 
   if (error) {
     return NextResponse.json(
@@ -128,8 +165,16 @@ export async function POST(req: NextRequest) {
   // Resolve any active esp32_offline alert since we just received a live batch
   await resolveAlert("esp32_offline");
 
+  const serverThresholdG = Number(espSource?.threshold_g ?? 0.3);
+  const serverCooldownSec = Number(espSource?.cooldown_seconds ?? 5);
+
   return NextResponse.json({
     ok: true,
-    ...((data as Record<string, unknown>) ?? {})
+    ...((data as Record<string, unknown>) ?? {}),
+    enabled: Boolean(espSource?.enabled ?? false),
+    thresholdG: serverThresholdG,
+    cooldownSeconds: serverCooldownSec,
+    cooldownMs: serverCooldownSec * 1000,
+    portionsPerTrigger: Number(espSource?.portions_per_trigger ?? 1)
   });
 }

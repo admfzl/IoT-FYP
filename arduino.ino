@@ -90,6 +90,9 @@ bool gravityInitialized = false;
 // Trigger & Telemetry tracking
 volatile bool pendingFeedTrigger = false;
 volatile float pendingTriggerG = 0;
+volatile bool pendingConfigSync = false;
+float lastServerThresholdG = -1.0f;
+uint32_t lastServerCooldownMs = 0;
 uint32_t lastTriggerQueuedMs = 0;
 
 String lastTriggerStatus = "Idle (no triggers fired yet)";
@@ -280,6 +283,36 @@ long extractJsonInt(const String &json, const char *key, long defaultVal = -1) {
   return val * sign;
 }
 
+String extractJsonString(const String &json, const char *key, const String &defaultVal) {
+  String pattern = String("\"") + key + "\":\"";
+  int idx = json.indexOf(pattern);
+  if (idx < 0) return defaultVal;
+  idx += pattern.length();
+  int endIdx = json.indexOf("\"", idx);
+  if (endIdx < 0) return defaultVal;
+  return json.substring(idx, endIdx);
+}
+
+float extractJsonFloat(const String &json, const char *key, float defaultVal) {
+  String pattern = String("\"") + key + "\":";
+  int idx = json.indexOf(pattern);
+  if (idx < 0) return defaultVal;
+  idx += pattern.length();
+  while (idx < (int)json.length() && json[idx] == ' ') idx++;
+  return json.substring(idx).toFloat();
+}
+
+bool extractJsonBool(const String &json, const char *key, bool defaultVal) {
+  String pattern = String("\"") + key + "\":";
+  int idx = json.indexOf(pattern);
+  if (idx < 0) return defaultVal;
+  idx += pattern.length();
+  while (idx < (int)json.length() && json[idx] == ' ') idx++;
+  if (json.substring(idx, idx + 4) == "true") return true;
+  if (json.substring(idx, idx + 5) == "false") return false;
+  return defaultVal;
+}
+
 // ========================================
 // HTTP / HTTPS POST HELPER
 // Works with both local http://...:3000 and https://*.workers.dev
@@ -409,6 +442,9 @@ void sendTelemetryHeartbeat() {
     return;
   }
 
+  bool pushConfigFlag = pendingConfigSync;
+  pendingConfigSync = false;
+
   String telemUrl = cfgServerUrl + "/api/esp32/telemetry";
   String body = "{";
   body += "\"x\":" + String(latestX, 4) + ",";
@@ -417,6 +453,10 @@ void sendTelemetryHeartbeat() {
   body += "\"dynamicG\":" + String(latestDynamicG, 3) + ",";
   body += "\"rawTotalG\":" + String(latestRawTotalG, 3) + ",";
   body += "\"thresholdG\":" + String(cfgThresholdG, 2) + ",";
+  body += "\"cooldownMs\":" + String(cfgCooldownMs) + ",";
+  if (pushConfigFlag) {
+    body += "\"configUpdated\":true,";
+  }
   body += "\"sequence\":" + String(nextSequence) + ",";
   body += "\"sensorErrors\":" + String(sensorErrors) + ",";
   body += "\"espIp\":\"" + WiFi.localIP().toString() + "\",";
@@ -431,6 +471,31 @@ void sendTelemetryHeartbeat() {
   int code = sendJsonPost(telemUrl, cfgFeedToken, body, resp, 2500);
   if (code >= 200 && code < 300) {
     lastTelemetryStatus = "OK (HTTP " + String(code) + ")";
+
+    // Sync ADXL345 threshold & cooldown configured on the web dashboard
+    float srvThr = extractJsonFloat(resp, "thresholdG", -1.0f);
+    long srvCdMs = extractJsonInt(resp, "cooldownMs", -1);
+    bool changed = false;
+
+    if (srvThr >= 0.01f && srvThr <= 16.0f && fabsf(srvThr - lastServerThresholdG) >= 0.001f) {
+      lastServerThresholdG = srvThr;
+      if (fabsf(cfgThresholdG - srvThr) >= 0.001f) {
+        cfgThresholdG = srvThr;
+        changed = true;
+      }
+    }
+    if (srvCdMs >= 500 && srvCdMs <= 86400000L && (uint32_t)srvCdMs != lastServerCooldownMs) {
+      lastServerCooldownMs = (uint32_t)srvCdMs;
+      if (cfgCooldownMs != (uint32_t)srvCdMs) {
+        cfgCooldownMs = (uint32_t)srvCdMs;
+        changed = true;
+      }
+    }
+    if (changed) {
+      saveSettings();
+      Serial.printf("[ESP32<-Server] Synced ADXL345 thresholdG=%.2f g, cooldownMs=%lu ms\n",
+                    cfgThresholdG, (unsigned long)cfgCooldownMs);
+    }
   } else {
     lastTelemetryStatus = "ERR (" + String(code) + ") -> Check Server URL";
   }
@@ -663,11 +728,11 @@ button {
       </div>
       <div style="flex:1; min-width:120px;">
         <label>Trigger Threshold (g)</label>
-        <input type="number" step="0.05" min="0.05" max="5.0" id="thresholdG">
+        <input type="number" step="0.01" min="0.01" max="16.0" id="thresholdG">
       </div>
       <div style="flex:1; min-width:120px;">
         <label>Cooldown (ms)</label>
-        <input type="number" step="500" min="1000" id="cooldownMs">
+        <input type="number" step="500" min="500" id="cooldownMs">
       </div>
     </div>
 
@@ -715,6 +780,15 @@ async function updateData() {
       document.getElementById('cooldownMs').value = data.cooldownMs;
       document.getElementById('autoTrigger').checked = data.autoTrigger;
       document.getElementById('pushTelemetry').checked = data.pushTelemetry;
+    } else if (configLoaded) {
+      const thrEl = document.getElementById('thresholdG');
+      const cdEl = document.getElementById('cooldownMs');
+      if (document.activeElement !== thrEl && data.thresholdG !== undefined) {
+        thrEl.value = data.thresholdG;
+      }
+      if (document.activeElement !== cdEl && data.cooldownMs !== undefined) {
+        cdEl.value = data.cooldownMs;
+      }
     }
   } catch (e) {}
 }
@@ -799,36 +873,6 @@ void handleData() {
 // CONFIG & MANUAL TRIGGER ENDPOINTS ON ESP32
 // ========================================
 
-String extractJsonString(const String &json, const char *key, const String &defaultVal) {
-  String pattern = String("\"") + key + "\":\"";
-  int idx = json.indexOf(pattern);
-  if (idx < 0) return defaultVal;
-  idx += pattern.length();
-  int endIdx = json.indexOf("\"", idx);
-  if (endIdx < 0) return defaultVal;
-  return json.substring(idx, endIdx);
-}
-
-float extractJsonFloat(const String &json, const char *key, float defaultVal) {
-  String pattern = String("\"") + key + "\":";
-  int idx = json.indexOf(pattern);
-  if (idx < 0) return defaultVal;
-  idx += pattern.length();
-  while (idx < (int)json.length() && json[idx] == ' ') idx++;
-  return json.substring(idx).toFloat();
-}
-
-bool extractJsonBool(const String &json, const char *key, bool defaultVal) {
-  String pattern = String("\"") + key + "\":";
-  int idx = json.indexOf(pattern);
-  if (idx < 0) return defaultVal;
-  idx += pattern.length();
-  while (idx < (int)json.length() && json[idx] == ' ') idx++;
-  if (json.substring(idx, idx + 4) == "true") return true;
-  if (json.substring(idx, idx + 5) == "false") return false;
-  return defaultVal;
-}
-
 void handleConfigPost() {
   addCorsHeaders();
   if (!server.hasArg("plain")) {
@@ -840,13 +884,20 @@ void handleConfigPost() {
   cfgFeedToken = extractJsonString(body, "feedToken", cfgFeedToken);
   cfgRunLabel  = extractJsonString(body, "runLabel", cfgRunLabel);
   float thr    = extractJsonFloat(body, "thresholdG", cfgThresholdG);
-  if (thr >= 0.02f && thr <= 10.0f) cfgThresholdG = thr;
+  if (thr >= 0.01f && thr <= 16.0f) {
+    cfgThresholdG = thr;
+    lastServerThresholdG = thr;
+  }
   long cd      = extractJsonInt(body, "cooldownMs", cfgCooldownMs);
-  if (cd >= 500 && cd <= 120000) cfgCooldownMs = (uint32_t)cd;
+  if (cd >= 500 && cd <= 3600000L) {
+    cfgCooldownMs = (uint32_t)cd;
+    lastServerCooldownMs = (uint32_t)cd;
+  }
   cfgAutoTrigger = extractJsonBool(body, "autoTrigger", cfgAutoTrigger);
   cfgPushTelemetry = extractJsonBool(body, "pushTelemetry", cfgPushTelemetry);
 
   saveSettings();
+  pendingConfigSync = true;
   Serial.println("[ESP32 Config Updated] Target Server: " + cfgServerUrl);
   server.send(200, "application/json", "{\"ok\":true}");
 }
