@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyFeedToken } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isTuyaConfigured } from "@/lib/tuya";
-import { isEmailConfigured, isTelegramConfigured } from "@/lib/notify";
 import { safeTimezone } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
@@ -24,10 +23,6 @@ export async function GET() {
       tuyaConfigured: isTuyaConfigured(),
       tuyaDeviceId:
         process.env.TUYA_DEVICE_ID?.trim() || "a33d5216f7875b6d3er7kk",
-      channelsConfigured: {
-        telegram: isTelegramConfigured(),
-        email: isEmailConfigured()
-      },
       esp32Heartbeat: heartbeats?.[0] ?? null
     });
   } catch (err) {

@@ -11,8 +11,8 @@
 // WIFI CONFIGURATION
 // ========================================
 
-const char* WIFI_SSID = "me broke";
-const char* WIFI_PASSWORD = "N0_Th1ng";
+const char* WIFI_SSID = "internet_9239";
+const char* WIFI_PASSWORD = "Eraser123";
 
 // ========================================
 // DEFAULT NEXT.JS / CLOUDFLARE SERVER CONFIG

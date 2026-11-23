@@ -38,10 +38,6 @@ TUYA_DEVICE_ID=a33d5216f7875b6d3er7kk
 TUYA_BASE_URL=https://openapi-sg.iotbing.com
 FEED_API_TOKEN=
 CRON_SECRET=
-TELEGRAM_BOT_TOKEN=                 # optional
-TELEGRAM_CHAT_ID=                   # optional
-RESEND_API_KEY=                     # optional
-ALERT_EMAIL_TO=                     # optional
 ```
 
 ### `wrangler secret put` commands for Cloudflare Workers deployment
@@ -54,10 +50,6 @@ npx wrangler secret put TUYA_CLIENT_ID
 npx wrangler secret put TUYA_CLIENT_SECRET
 npx wrangler secret put FEED_API_TOKEN
 npx wrangler secret put CRON_SECRET
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put TELEGRAM_CHAT_ID
-npx wrangler secret put RESEND_API_KEY
-npx wrangler secret put ALERT_EMAIL_TO
 ```
 
 If you also use Supabase Realtime on the Sensors page, set `NEXT_PUBLIC_SUPABASE_ANON_KEY` in `wrangler.jsonc` under `"vars"` (or via `npx wrangler secret put NEXT_PUBLIC_SUPABASE_ANON_KEY`).

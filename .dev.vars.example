@@ -10,7 +10,3 @@ TUYA_DEVICE_ID=a33d5216f7875b6d3er7kk
 TUYA_BASE_URL=https://openapi-sg.iotbing.com
 FEED_API_TOKEN=
 CRON_SECRET=
-TELEGRAM_BOT_TOKEN=                 # optional
-TELEGRAM_CHAT_ID=                   # optional
-RESEND_API_KEY=                     # optional
-ALERT_EMAIL_TO=                     # optional
